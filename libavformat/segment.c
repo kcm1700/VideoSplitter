@@ -75,6 +75,7 @@ typedef struct {
     int  write_header_trailer; /**< Set by a private option. */
     int has_video;
     double start_time, end_time;
+    int64_t segment_size;  ///< maximum segment file size. -1 if not used.
 } SegmentContext;
 
 static void print_csv_escaped_str(AVIOContext *ctx, const char *str)
@@ -173,7 +174,8 @@ static int segment_list_open(AVFormatContext *s)
         avio_printf(seg->list_pb, "#EXT-X-MEDIA-SEQUENCE:%d\n", seg->list_count);
         avio_printf(seg->list_pb, "#EXT-X-ALLOWCACHE:%d\n",
                     !!(seg->list_flags & SEGMENT_LIST_FLAG_CACHE));
-        if (seg->list_flags & SEGMENT_LIST_FLAG_LIVE)
+        if (seg->time_str &&
+            seg->list_flags & SEGMENT_LIST_FLAG_LIVE)
             avio_printf(seg->list_pb,
                         "#EXT-X-TARGETDURATION:%"PRId64"\n", seg->time / 1000000);
     }
@@ -337,9 +339,10 @@ static int seg_write_header(AVFormatContext *s)
             return ret;
     } else {
         /* set default value if not specified */
-        if (!seg->time_str)
+        if (!seg->time_str && seg->segment_size < 0)
             seg->time_str = av_strdup("2");
-        if ((ret = av_parse_time(&seg->time, seg->time_str, 1)) < 0) {
+        if (seg->time_str &&
+            (ret = av_parse_time(&seg->time, seg->time_str, 1)) < 0) {
             av_log(s, AV_LOG_ERROR,
                    "Invalid time duration specification '%s' for segment_time option\n",
                    seg->time_str);
@@ -442,19 +445,28 @@ static int seg_write_packet(AVFormatContext *s, AVPacket *pkt)
     AVFormatContext *oc = seg->avf;
     AVStream *st = s->streams[pkt->stream_index];
     int64_t end_pts;
+    int64_t max_segment_size;
     int ret;
 
     if (seg->times) {
         end_pts = seg->segment_count <= seg->nb_times ?
             seg->times[seg->segment_count-1] : INT64_MAX;
-    } else {
+    } else if (seg->time_str) {
         end_pts = seg->time * seg->segment_count;
+    } else {
+        end_pts = INT64_MAX;
+    }
+
+    max_segment_size = seg->segment_size;
+    if (max_segment_size < 0) {
+        max_segment_size = INT64_MAX;
     }
 
     /* if the segment has video, start a new segment *only* with a key video frame */
     if ((st->codec->codec_type == AVMEDIA_TYPE_VIDEO || !seg->has_video) &&
-        av_compare_ts(pkt->pts, st->time_base,
-                      end_pts-seg->time_delta, AV_TIME_BASE_Q) >= 0 &&
+        (av_compare_ts(pkt->pts, st->time_base,
+                      end_pts-seg->time_delta, AV_TIME_BASE_Q) >= 0 ||
+         avio_tell(oc->pb) >= max_segment_size) &&
         pkt->flags & AV_PKT_FLAG_KEY) {
 
         av_log(s, AV_LOG_DEBUG, "Next segment starts with packet stream:%d pts:%"PRId64" pts_time:%f\n",
@@ -536,6 +548,7 @@ static const AVOption options[] = {
     { "segment_wrap",      "set number after which the index wraps",     OFFSET(segment_idx_wrap), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, E },
     { "individual_header_trailer", "write header/trailer to each segment", OFFSET(individual_header_trailer), AV_OPT_TYPE_INT, {.i64 = 1}, 0, 1, E },
     { "write_header_trailer", "write a header to the first segment and a trailer to the last one", OFFSET(write_header_trailer), AV_OPT_TYPE_INT, {.i64 = 1}, 0, 1, E },
+    { "segment_size", "set segment size in bytes", OFFSET(segment_size), AV_OPT_TYPE_INT, {.i64 = -1}, -1, INT64_MAX, E },
     { NULL },
 };
 
