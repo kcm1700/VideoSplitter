@@ -108,9 +108,20 @@ static int segment_mux_init(AVFormatContext *s)
 
     for (i = 0; i < s->nb_streams; i++) {
         AVStream *st;
+        AVCodecContext *icodec, *codec;
         if (!(st = avformat_new_stream(oc, NULL)))
             return AVERROR(ENOMEM);
-        avcodec_copy_context(st->codec, s->streams[i]->codec);
+
+        icodec = s->streams[i]->codec;
+        codec = st->codec;
+        avcodec_copy_context(codec, icodec);
+        if (!oc->oformat->codec_tag ||
+             av_codec_get_id (oc->oformat->codec_tag, icodec->codec_tag) == codec->codec_id ||
+             av_codec_get_tag(oc->oformat->codec_tag, icodec->codec_id) <= 0) {
+            codec->codec_tag = icodec->codec_tag;
+        } else {
+            codec->codec_tag = 0;
+        }
         st->sample_aspect_ratio = s->streams[i]->sample_aspect_ratio;
     }
 
